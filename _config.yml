@@ -3,17 +3,17 @@
 ## Source: https://github.com/hexojs/hexo/
 
 # Site
-title: Hexo
+title: 'APC的赛博小窝'
 subtitle: ''
-description: ''
+description: '简单记录自己所学的知识与技术，感谢你的喜欢！'
 keywords:
-author: John Doe
-language: en
+author: Apcine
+language: zh-CN
 timezone: ''
 
 # URL
 ## Set your site url here. For example, if you use GitHub Page, set url as 'https://username.github.io/project'
-url: http://example.com
+url: http://apcfufu.com
 permalink: :year/:month/:day/:title/
 permalink_defaults:
 pretty_urls:
