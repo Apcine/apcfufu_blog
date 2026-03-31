@@ -174,79 +174,217 @@ print(json_result)
 - 为什么需要 Memory
 正常调用大模型是不会记住上下文的，也就是上一次调用大模型的对话内容下一次调用大模型时，大模型是不会“记得”的。
 
+### 3.2 底层存储类ChatMessageHistory
+作为所有记忆组件的底层基础，仅负责纯消息对象的存储 / 管理（直接操作HumanMessage/AIMessage等对象），无任何记忆策略（无裁剪、无摘要、无筛选），也不涉及消息格式化（如转字符串）
 
+### 3.3 基础记忆类
+- ConversationBufferMemory
+按原始顺序完整存储所有对话历史，无裁剪、无压缩，是最基础的对话记忆组件；可通过memory_key自定义历史变量名，return_messages控制输出格式
+```Python
+#先要调用大模型，这里省略调用大模型的代码了
+from langchain_classic.memory import ConversationBufferMemory
+memory = ConversationBufferMemory()
 
+#存储历史信息
+memory.save_context(
+    inputs={"input":"你好，科塔娜"},
+    outputs={"output":"你好，我是人工智能助手科塔娜"}
+)
+memory.save_context(
+    inputs={"input":"你知道科塔娜这个名字的由来吗？"},
+    outputs={"output":"科塔娜首次出场于经典科幻射击类游戏《Halo》，是其中主角的人工智能助手的名字，在微软游戏收购《Halo》后，微软为其智能助手的名字设置为了科塔娜"}
+)
+
+prompt_template = PromptTemplate.from_template(
+    template="""
+    你可以与人类对话
+    当前对话历史：{history}
+    人类问题：{question}
+    回复：
+    """
+)
+
+chain = LLMChain(llm=llm_,prompt=prompt_template,memory=memory)
+response = chain.invoke({"question":"你知道《halo》的主角吗？"})
+print(response)
+response = chain.invoke({"question":"你是谁？"})
+print(response)
+```
+- ConversationBufferWindowMemory
+在ConversationBufferMemory基础上增加窗口限制，仅保留最近 k 条对话交互，按对话条数裁剪历史，避免内存 /token 过载。超出k条的对话内容则直接丢失，会错失早期信息。
+
+### 3.4 进阶记忆类
+- ConversationBufferWindowMemory
+基于Token 数量精准控制记忆容量，设置max_token_limit阈值，超阈值时自动移除最早的消息，保留原始对话内容（无压缩 / 摘要）
+
+- ConversationSummaryMemory
+通过大模型自动生成对话摘要，用精简的摘要文本替代原始对话存储，新对话加入时会动态更新摘要（旧摘要 + 新对话→新摘要），大幅压缩历史内容。
+```python
+from langchain_classic.memory import ConversationSummaryMemory
+memory = ConversationSummaryMemory(llm=llm_)
+memory.save_context({"input":"你好"},{"output":"怎么了"})
+memory.save_context({"input":"你是谁"},{"output":"我是ai助手"})
+memory.save_context({"input":"你知道你的生日吗"},{"output":"我没有生日"})
+
+print(memory.load_memory_variables({}))
+```
+-ConversationSummaryBufferMemory
+融合ConversationBufferMemory和ConversationSummaryMemory, 保留最近 N 条原始对话，对超出缓冲区的早期对话生成摘要，平衡最新交互的细节和早期对话的核心信息。
+```python
+from langchain_classic.memory.summary_buffer import ConversationSummaryBufferMemory
+from langchain_core.prompts import MessagesPlaceholder,ChatPromptTemplate
+from langchain_classic.chains.llm import LLMChain
+
+prompt = ChatPromptTemplate.from_messages([
+    ("system", "你是猫娘。"),
+    MessagesPlaceholder(variable_name="chat_history"),
+    ("human", "{input}")
+])
+memory = ConversationSummaryBufferMemory(
+    llm=llm,
+    max_token_limit=400,
+    memory_key="chat_history",
+    return_messages=True
+)
+
+memory.save_context(inputs={"input":"你好，我是猫咪，你是猫娘"},outputs={"output":"你好，我是智能猫娘AI"})
+memory.save_context(inputs={"input":"每一句话结束都要带喵字"},outputs={"output":"好的喵"})
+memory.save_context(inputs={"input":"卡拉比丘怎么样了？"},outputs={"output":"卡拉比丘似了喵！"})
+
+chain = LLMChain(
+    llm=llm,
+    prompt=prompt,
+    memory=memory,
+)
+
+dialogue = [
+    ("你好，你是谁？", None),
+    ("我是谁？", None),
+]
+
+for user_input, _ in dialogue:
+    response = chain.invoke({"input": user_input})
+    print(f"用户: {user_input}")
+    print(f"客服: {response['text']}\n")
+
+print(memory.load_memory_variables({}))
+```
 
 ---
 
 ## 四、Tools（工具调用）
 
 ### 4.1 Tool 基础定义
+Tools 用于扩展大语言模型（LLM）的能力，使其能够与外部系统、API 或自定义函数交互，从而完成仅靠文本生成无法实现的任务（如搜索、计算、数据库查询等）。Tools 本质上是封装了特定功能的可调用模块，是Agent、Chain或LLM可以用来与世界互动的接口。
+
 - `@tool` 装饰器
-- `StructuredTool` - 结构化参数
-- Tool 的 name、description 设计原则
+用装饰器快速封装函数为工具，默认用函数名做工具名、文档字符串做描述
+```python
+#使用@tools定义工具
+from langchain_classic.tools import tool
 
-### 4.2 内置工具集
-- `Search` 工具（DuckDuckGo、Google）
-- `Wikipedia` 查询
-- `Python REPL` 代码执行
-- `Calculator` 计算工具
-- API 调用工具
+@tool(name_or_callable="add_two_number",description="add two number",return_direct=True)
+def add_number(a:int, b:int) -> int:
+    """计算两数之和"""
+    return a+b
 
-### 4.3 自定义工具开发
-- 函数转 Tool 的最佳实践
-- 异步 Tool 实现
-- 错误处理与重试机制
-- Tool 返回值的规范化
 
-### 4.4 Tool Calling 机制
-- Function Calling vs Tool Use
-- OpenAI 函数调用规范
-- 多工具并行执行
-- 工具选择策略
+print(f"name={add_number.name}")
+```
+- `StructuredTool` 
+类方法创建工具，配置项更丰富，支持同步 / 异步实现
+```py
+#StructuredTool的from_fuction()的使用
+from langchain_core.tools import StructuredTool
+
+def search_google(query: str):
+    return "最后查询的结果"
+
+search01 = StructuredTool.from_function(
+    func=search_google,
+    name="Search",
+    description="查询google搜索引擎并将结果返回",
+)
+print(f"name={search01.name}")
+print(f"args={search01.args}")
+
+search01.invoke({"query":"中美AI的发展现状"})
+```
+
+
+### 4.2 工具调用示例
+```py
+import json
+# 获取大模型
+import os
+import dotenv
+from langchain_community.tools import MoveFileTool
+from langchain_core.messages import HumanMessage
+from langchain_openai import ChatOpenAI
+
+# 加载环境变量
+dotenv.load_dotenv(override=True)
+os.environ["DASHSCOPE_API_KEY"] = os.getenv("DASHSCOPE_API_KEY")
+os.environ["DASHSCOPE_BASE_URL"] = os.getenv("DASHSCOPE_BASE_URL")
+
+# 初始化大模型（重点：适配DashScope的函数调用格式）
+chat_model = ChatOpenAI(
+    model="qwen-plus",
+    api_key=os.getenv("DASHSCOPE_API_KEY"),
+    base_url=os.getenv("DASHSCOPE_BASE_URL"),
+    temperature=0.1  # 可选，降低随机性
+)
+
+# 获取工具并转换为DashScope兼容的函数格式
+tools = [MoveFileTool()]
+# 手动构造DashScope要求的函数格式（替代convert_to_openai_tool）
+functions = []
+for tool in tools:
+    # 提取工具的元信息，组装为DashScope要求的格式
+    func_schema = {
+        "name": tool.name,  # 核心：确保name字段存在且正确
+        "description": tool.description,
+        "parameters": tool.args,  # 工具的参数定义
+        "type": "function"  # DashScope要求的固定字段
+    }
+    functions.append(func_schema)
+
+# 构造消息（补充函数调用的提示，让模型知道要调用工具）
+messages = [
+    HumanMessage(content="将当前目录下文件a.txt移动到C:\\Users\\apc\\Desktop")
+]
+
+# 调用大模型（关键：用function_call指定调用方式，参数格式适配DashScope）
+response = chat_model.invoke(
+    input=messages,
+    functions=functions,
+    function_call={"name": "move_file"}  # 明确指定要调用的函数名，避免模型猜错
+)
+
+# 打印响应结果
+if "function_call" in response.additional_kwargs:
+    tool_name = response.additional_kwargs["function_call"]["name"]
+    tool_args = json.loads(response.additional_kwargs["function_call"]["arguments"])
+    print(f"调用工具：{tool_name}\n 参数：{tool_args}")
+
+else:
+    print(f"模型回复：{response.content}")
+```
+
 
 ---
 
 ## 五、RAG（检索增强生成）
 
-### 5.1 RAG 架构概览
-- 索引 (Indexing) → 检索 (Retrieval) → 生成 (Generation)
-- Naive RAG vs Advanced RAG
-- 流程图与数据流
+### 5.1 RAG 
+RAG（检索增强生成）是缓解 LLM 幻觉、接入私有 / 实时知识的核心方案，LangChain Retrieval 模块封装了 RAG 全流程，用于构建私有知识库问答。
 
-### 5.2 Document 处理
-- `Document` 对象结构
-- 文档加载器 (Document Loaders)
-  - 文本文件、PDF、网页
-  - 数据库、API 数据源
+- 文档加载器 
+- 文档拆分器
+- 嵌入模型
+- 向量存储
+- 检索器
 
-### 5.3 文本分割策略
-- `CharacterTextSplitter`
-- `RecursiveCharacterTextSplitter`（推荐）
-- `TokenTextSplitter`
-- 基于语义的分割
-- Chunk Size 与 Overlap 调优
-
-### 5.4 向量化与存储
-- Embedding Models（OpenAI、HuggingFace、本地模型）
-- Vector Stores 对比
-  - Chroma（轻量本地）
-  - FAISS（Facebook）
-  - Milvus / Pinecone（生产级）
-- 索引持久化与加载
-
-### 5.5 检索策略
-- 相似度检索 (Similarity Search)
-- MMR (Max Marginal Relevance) 多样性检索
-- 元数据过滤
-- 多查询检索 (Multi-Query)
-- 重排序 (Reranking)
-
-### 5.6 Retrieval Chain 构建
-- `RetrievalQA` 基础链
-- `ConversationalRetrievalChain`（带历史对话）
-- 自定义 RAG Pipeline
-- 检索结果注入 Prompt 的方式
 
 ---
 
@@ -254,22 +392,77 @@ print(json_result)
 
 ### 6.1 Agent 核心概念
 - Agent = LLM + Tools + Memory + Planning
+LLM是大预言模型，也仅仅是语言模型，他做不了事情。但agent，他具有大语言模型做决策推断，配备有记忆能够上下文联系，也能调用工具完成任务，也被称之为智能体。
 - ReAct 推理模式
-- Plan-and-Execute 模式
+原理：思考→行动→观察循环，用自然语言做推理
+这里的案例中，给了模型两个工具，但模型自行推理判断只需要使用Search工具即可。
+```py
+import os
+import dotenv
+from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
+from langchain_experimental.cpal.templates.univariate.query import template
+from langchain_openai import ChatOpenAI
+from langchain_tavily import TavilySearch
+from langchain_core.tools import StructuredTool, Tool
+from langchain_classic.agents import AgentType, initialize_agent, create_tool_calling_agent, AgentExecutor, \
+    create_react_agent
+from langchain_experimental.utilities.python import PythonREPL
 
-### 6.2 Agent 类型对比
-- `ZERO_SHOT_REACT_DESCRIPTION`
-- `CHAT_ZERO_SHOT_REACT_DESCRIPTION`
-- `STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION`
-- OpenAI Functions Agent
-- 如何选择合适的 Agent 类型
 
-### 6.3 AgentExecutor
-- 执行循环机制
-- 最大迭代次数控制
-- 错误处理与早停
-- 回调与监控
 
+#使用react模型
+dotenv.load_dotenv()
+os.environ['TAVILY_API_KEY'] = os.getenv("TAVILY_API_KEY")
+
+#获取tavily搜索工具的实例
+Search = TavilySearch(max_results=5)
+
+#获取工具
+Search_tool = Tool(
+    func=Search.run,
+    name="Search",
+    description="用于检索互联网上的信息",
+)
+
+python_repl = PythonREPL()
+calc_tool = Tool(
+    name="Calculate",
+    func=python_repl.run,
+    description="用于执行数学计算，例如计算百分比变化"
+)
+#获取大语言模型
+os.environ["DASHSCOPE_API_KEY"]=os.getenv("DASHSCOPE_API_KEY")
+os.environ["DASHSCOPE_BASE_URL"]=os.getenv("DASHSCOPE_BASE_URL")
+# 创建通义千问大模型实例
+llm = ChatOpenAI(
+    model="qwen-plus",
+    api_key=os.getenv("DASHSCOPE_API_KEY"),
+    base_url=os.getenv("DASHSCOPE_BASE_URL")
+)
+#获取提示词模板
+chat_prompt = ChatPromptTemplate.from_messages([
+    ("system","你是一个智能ai助手，根据用户的提问，必要时调用Search工具，使用互联网检索数据"),
+    ("human","{input}"),
+    ("system","{agent_scratchpad}")
+])
+
+#获取agent的实例
+agent = create_tool_calling_agent(
+    llm = llm,
+    prompt = chat_prompt,
+    tools = [Search, calc_tool],
+)
+#获取AgentExecutor的实例
+agent_executor = AgentExecutor(
+    agent = agent,
+    tools=[Search, calc_tool],
+    verbose=True,
+)
+#通过
+result = agent_executor.invoke({"input":"查询今天上海的天气情况"})
+
+print(result)
+```
 ---
 
 ## 七、Chains（链式组合）
