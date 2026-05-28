@@ -1,4 +1,13 @@
-# Transformer 学习笔记
+---
+title: Transformer 学习笔记
+date: 2026-03-19 16:44:43
+tags:
+  - LLM
+  - AI
+  - Python
+categories:
+  - 学习笔记
+---
 > 学习记录：个人学习整理
 
 ## 目录
